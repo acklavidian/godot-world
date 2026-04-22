@@ -3,6 +3,7 @@
 [ext_resource type="PackedScene" uid="uid://b1wjrp3c2eit3" path="res://scene.tscn" id="1_noarx"]
 [ext_resource type="PackedScene" uid="uid://d3b2i412gk408" path="res://player/player.tscn" id="2_noarx"]
 [ext_resource type="PackedScene" uid="uid://cpausem0nu001" path="res://ui/pause_menu.tscn" id="3_noarx"]
+[ext_resource type="PackedScene" uid="uid://cswordtscn001" path="res://items/sword.tscn" id="4_noarx"]
 
 [node name="Node3D" type="Node3D" unique_id=1061140532]
 
@@ -13,3 +14,6 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.002202034, -0.040551662, -
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -9.5940895, 3.3437839, -2.01369)
 
 [node name="PauseMenu" parent="." unique_id=459513685 instance=ExtResource("3_noarx")]
+
+[node name="Sword" parent="." unique_id=987654321 instance=ExtResource("4_noarx")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -7.5, 0.3907168, -2)

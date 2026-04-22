@@ -1,8 +1,18 @@
 [gd_scene format=3 uid="uid://b1wjrp3c2eit3"]
 
 [ext_resource type="PackedScene" uid="uid://bf2qn8i0l1eyn" path="res://scene.glb" id="1_ulcgi"]
+[ext_resource type="Texture2D" uid="uid://dhshvbacdnq4q" path="res://citrus_orchard_road_puresky_4k.hdr" id="2_nxogm"]
+
+[sub_resource type="PanoramaSkyMaterial" id="PanoramaSkyMaterial_ulcgi"]
+panorama = ExtResource("2_nxogm")
+
+[sub_resource type="Sky" id="Sky_nxogm"]
+sky_material = SubResource("PanoramaSkyMaterial_ulcgi")
 
 [sub_resource type="Environment" id="Environment_ulcgi"]
+background_mode = 2
+sky = SubResource("Sky_nxogm")
+ambient_light_source = 3
 ambient_light_color = Color(0.5132329, 0.5132329, 0.5132329, 1)
 ambient_light_energy = 3.25
 
@@ -24,7 +34,7 @@ compositor = SubResource("Compositor_3253y")
 transform = Transform3D(1, 0, 0, 0, -0.59129554, 0.80645496, 0, -0.80645496, -0.59129554, 0, 8.810476, -10.638467)
 shadow_enabled = true
 
-[node name="StaticBody3D" type="StaticBody3D" parent="Level" parent_id_path=PackedInt32Array(227496159) index="0" unique_id=2097007559]
+[node name="StaticBody3D" type="StaticBody3D" parent="Level" parent_id_path=PackedInt32Array(394894695) index="0" unique_id=2097007559]
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="Level/StaticBody3D" index="0" unique_id=1408876358]
 shape = SubResource("ConcavePolygonShape3D_ulcgi")

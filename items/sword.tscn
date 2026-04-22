@@ -1,0 +1,6 @@
+[gd_scene format=3 uid="uid://cswordtscn001"]
+
+[ext_resource type="Script" uid="uid://cswordgd00001" path="res://items/sword.gd" id="1_sword"]
+
+[node name="Sword" type="Node3D"]
+script = ExtResource("1_sword")

@@ -12,7 +12,11 @@ const BLEND_LAND := 0.2
 const BLEND_ROLL := 0.1
 const BLEND_ROLL_OUT := 0.5  # walk/sprint fades in over this duration while roll plays out
 const LAND_WALK_BLEND_START := 0.1  # fraction through Jump_Land when walk begins blending in
+const ATTACK_WALK_BLEND_START := 0.5  # fraction through attack when walk begins blending in
+const ATTACK_LUNGE_SPEED := 4.0
+const ATTACK_LUNGE_DECAY := 8.0
 const BLEND_WALL_PRESS := 0.15
+const BLEND_ATTACK := 0.1
 
 const HEAD_YAW_LIMIT  := PI / 3.0   # 60° left/right
 const HEAD_PITCH_LIMIT := PI / 4.0  # 45° up/down
@@ -31,6 +35,11 @@ var _smooth_wall_angle := 0.0
 var _was_on_floor := true
 var _pending_locomotion := ""  # locomotion anim to blend in one frame after roll starts
 var _is_crouching := false
+var _equipped_item: Node3D = null
+var _hand_attach: BoneAttachment3D = null
+var _is_attacking := false
+var _attack_lunge_vel := Vector3.ZERO
+var _last_punch := ""
 var _wall_normal := Vector3.ZERO
 var _wall_pressed := false
 var _ledge_detector: Area3D = null
@@ -52,11 +61,23 @@ func _ready() -> void:
 		_spine_bone = skeleton.find_bone("Spine")
 		_left_arm_ik = _make_arm_ik("LeftUpperArm", "LeftHand")
 		_right_arm_ik = _make_arm_ik("RightUpperArm", "RightHand")
+		_hand_attach = BoneAttachment3D.new()
+		_hand_attach.bone_name = "RightHand"
+		skeleton.add_child(_hand_attach)
 	char_anim.animation_finished.connect(_on_animation_finished)
 	char_anim.mixer_applied.connect(_apply_head_look)
 	char_anim.play("Idle", BLEND_LOCOMOTION)
 	camera_pivot.top_level = true
 	camera_pivot.global_position = global_position + Vector3(0, 1.5, 0)
+
+func try_pickup(item: Node3D) -> void:
+	if _equipped_item:
+		return
+	item.disable_pickup()
+	item.reparent(_hand_attach)
+	item.position = Vector3(0.1, 0.1, 0.02)
+	item.rotation = Vector3(0.0, 0.0, -PI / 2)
+	_equipped_item = item
 
 func _on_animation_finished(anim_name: String) -> void:
 	match anim_name:
@@ -68,6 +89,25 @@ func _on_animation_finished(anim_name: String) -> void:
 		"Roll":
 			_pending_locomotion = ""
 			_play_locomotion()
+		"Sword_Attack", "Punch_Cross", "Punch_Jab":
+			_pending_locomotion = ""
+			_is_attacking = false
+			_play_locomotion()
+
+func _start_attack(anim_name: String) -> void:
+	var anim := char_anim.get_animation(anim_name)
+	if anim:
+		anim.loop_mode = Animation.LOOP_NONE
+	_is_attacking = true
+	_attack_lunge_vel = global_transform.basis.z * ATTACK_LUNGE_SPEED
+	var horizontal_speed := Vector2(velocity.x, velocity.z).length()
+	if horizontal_speed > 0.1:
+		_pending_locomotion = "Sprint" if Input.is_action_pressed("sprint") else "Walk"
+	char_anim.play(anim_name, BLEND_ATTACK)
+
+func _next_punch() -> String:
+	_last_punch = "Punch_Jab" if _last_punch == "Punch_Cross" else "Punch_Cross"
+	return _last_punch
 
 func _play_locomotion() -> void:
 	var horizontal_speed := Vector2(velocity.x, velocity.z).length()
@@ -83,6 +123,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		camera_pivot.rotation.y -= event.relative.x * MOUSE_SENSITIVITY
 		camera_pivot.rotation.x -= event.relative.y * MOUSE_SENSITIVITY
 		camera_pivot.rotation.x = clampf(camera_pivot.rotation.x, -PI * 0.5, PI * 0.5)
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+		if not _is_attacking:
+			var cur := char_anim.current_animation
+			if cur not in ["Jump_Start", "Jump", "Roll", "Jump_Land"]:
+				_start_attack("Sword_Attack" if _equipped_item else _next_punch())
 
 func _physics_process(delta: float) -> void:
 	if _ledge_grab_active:
@@ -97,35 +142,42 @@ func _physics_process(delta: float) -> void:
 	_is_crouching = Input.is_key_pressed(KEY_CTRL) and on_floor
 
 	if Input.is_action_just_pressed("jump") and on_floor and not Input.is_key_pressed(KEY_CTRL):
+		_is_attacking = false
 		velocity.y = JUMP_VELOCITY
 		char_anim.play("Jump_Start", BLEND_JUMP)
 		_wall_pressed = false
 		_start_ledge_detection()
 
-	var speed := CROUCH_SPEED if _is_crouching else (SPRINT_SPEED if Input.is_action_pressed("sprint") else SPEED)
-	var input_dir := Input.get_vector("move_left", "move_right", "move_forward", "move_backward")
-
-	var cam_forward := camera_pivot.global_basis.z
-	cam_forward.y = 0
-	cam_forward = cam_forward.normalized()
-	var cam_right := -camera_pivot.global_basis.x
-	cam_right.y = 0
-	cam_right = cam_right.normalized()
-	var direction := (cam_right * input_dir.x + cam_forward * -input_dir.y).normalized()
-
-	if direction:
-		velocity.x = direction.x * speed
-		velocity.z = direction.z * speed
-		if _wall_pressed and direction.dot(-_wall_normal) > 0.3:
-			# Pushing into wall — lock back-to-wall so the character doesn't face it head-on
-			rotation.y = lerp_angle(rotation.y, atan2(_wall_normal.x, _wall_normal.z), delta * 10.0)
-		else:
-			rotation.y = lerp_angle(rotation.y, atan2(direction.x, direction.z), delta * 8.0)
+	var direction := Vector3.ZERO
+	if _is_attacking:
+		velocity.x = lerpf(velocity.x, _attack_lunge_vel.x, delta * ATTACK_LUNGE_DECAY)
+		velocity.z = lerpf(velocity.z, _attack_lunge_vel.z, delta * ATTACK_LUNGE_DECAY)
+		_attack_lunge_vel = _attack_lunge_vel.lerp(Vector3.ZERO, delta * ATTACK_LUNGE_DECAY)
 	else:
-		velocity.x = move_toward(velocity.x, 0, speed)
-		velocity.z = move_toward(velocity.z, 0, speed)
-		if _wall_pressed:
-			rotation.y = lerp_angle(rotation.y, atan2(_wall_normal.x, _wall_normal.z), delta * 10.0)
+		var speed := CROUCH_SPEED if _is_crouching else (SPRINT_SPEED if Input.is_action_pressed("sprint") else SPEED)
+		var input_dir := Input.get_vector("move_left", "move_right", "move_forward", "move_backward")
+
+		var cam_forward := camera_pivot.global_basis.z
+		cam_forward.y = 0
+		cam_forward = cam_forward.normalized()
+		var cam_right := -camera_pivot.global_basis.x
+		cam_right.y = 0
+		cam_right = cam_right.normalized()
+		direction = (cam_right * input_dir.x + cam_forward * -input_dir.y).normalized()
+
+		if direction:
+			velocity.x = direction.x * speed
+			velocity.z = direction.z * speed
+			if _wall_pressed and direction.dot(-_wall_normal) > 0.3:
+				# Pushing into wall — lock back-to-wall so the character doesn't face it head-on
+				rotation.y = lerp_angle(rotation.y, atan2(_wall_normal.x, _wall_normal.z), delta * 10.0)
+			else:
+				rotation.y = lerp_angle(rotation.y, atan2(direction.x, direction.z), delta * 8.0)
+		else:
+			velocity.x = move_toward(velocity.x, 0, speed)
+			velocity.z = move_toward(velocity.z, 0, speed)
+			if _wall_pressed:
+				rotation.y = lerp_angle(rotation.y, atan2(_wall_normal.x, _wall_normal.z), delta * 10.0)
 
 	move_and_slide()
 
@@ -308,6 +360,11 @@ func _update_animation(on_floor: bool) -> void:
 	var current := char_anim.current_animation
 	var horizontal_speed := Vector2(velocity.x, velocity.z).length()
 
+	if _is_attacking and current not in ["Sword_Attack", "Punch_Cross", "Punch_Jab"]:
+		_pending_locomotion = ""
+		_is_attacking = false
+		_attack_lunge_vel = Vector3.ZERO
+
 	# One frame after roll starts, begin blending locomotion in so they play simultaneously
 	if _pending_locomotion != "" and current == "Roll":
 		char_anim.play(_pending_locomotion, BLEND_ROLL_OUT)
@@ -318,6 +375,14 @@ func _update_animation(on_floor: bool) -> void:
 	if _pending_locomotion != "" and current == "Jump_Land":
 		var anim_len := char_anim.current_animation_length
 		if anim_len > 0.0 and char_anim.current_animation_position / anim_len >= LAND_WALK_BLEND_START:
+			char_anim.play(_pending_locomotion, BLEND_ROLL_OUT)
+			_pending_locomotion = ""
+		return
+
+	# Blend walk back in during the second half of an attack
+	if _pending_locomotion != "" and current in ["Sword_Attack", "Punch_Cross", "Punch_Jab"]:
+		var anim_len := char_anim.current_animation_length
+		if anim_len > 0.0 and char_anim.current_animation_position / anim_len >= ATTACK_WALK_BLEND_START:
 			char_anim.play(_pending_locomotion, BLEND_ROLL_OUT)
 			_pending_locomotion = ""
 		return
@@ -340,7 +405,7 @@ func _update_animation(on_floor: bool) -> void:
 		return
 
 	# Don't interrupt one-shot ground animations
-	if current in ["Jump_Start", "Jump_Land", "Roll"]:
+	if current in ["Jump_Start", "Jump_Land", "Roll", "Sword_Attack", "Punch_Cross", "Punch_Jab"]:
 		return
 
 	# Crouch
