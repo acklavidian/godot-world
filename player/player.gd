@@ -2,6 +2,7 @@ extends CharacterBody3D
 
 const SPEED := 1.0
 const SPRINT_SPEED := 9.0
+const CROUCH_SPEED := 0.5
 const JUMP_VELOCITY := 4.5
 const MOUSE_SENSITIVITY := 0.002
 
@@ -10,6 +11,7 @@ const BLEND_JUMP := 0.15
 const BLEND_LAND := 0.2
 const BLEND_ROLL := 0.1
 const BLEND_ROLL_OUT := 0.5  # walk/sprint fades in over this duration while roll plays out
+const LAND_WALK_BLEND_START := 0.1  # fraction through Jump_Land when walk begins blending in
 const BLEND_WALL_PRESS := 0.15
 
 const HEAD_YAW_LIMIT  := PI / 3.0   # 60° left/right
@@ -28,6 +30,7 @@ var _spine_yaw := 0.0
 var _smooth_wall_angle := 0.0
 var _was_on_floor := true
 var _pending_locomotion := ""  # locomotion anim to blend in one frame after roll starts
+var _is_crouching := false
 var _wall_normal := Vector3.ZERO
 var _wall_pressed := false
 var _ledge_detector: Area3D = null
@@ -60,6 +63,7 @@ func _on_animation_finished(anim_name: String) -> void:
 		"Jump_Start":
 			char_anim.play("Jump", BLEND_JUMP)
 		"Jump_Land":
+			_pending_locomotion = ""
 			_play_locomotion()
 		"Roll":
 			_pending_locomotion = ""
@@ -70,6 +74,9 @@ func _play_locomotion() -> void:
 	var target := "Sprint" if (horizontal_speed > 0.1 and Input.is_action_pressed("sprint")) else ("Walk" if horizontal_speed > 0.1 else "Idle")
 	if char_anim.current_animation != target:
 		char_anim.play(target, BLEND_LOCOMOTION)
+
+func _process(_delta: float) -> void:
+	camera_pivot.global_position = global_position + Vector3(0, 1.5, 0)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
@@ -87,13 +94,15 @@ func _physics_process(delta: float) -> void:
 	if not on_floor:
 		velocity += get_gravity() * delta
 
-	if Input.is_action_just_pressed("jump") and on_floor:
+	_is_crouching = Input.is_key_pressed(KEY_CTRL) and on_floor
+
+	if Input.is_action_just_pressed("jump") and on_floor and not Input.is_key_pressed(KEY_CTRL):
 		velocity.y = JUMP_VELOCITY
 		char_anim.play("Jump_Start", BLEND_JUMP)
 		_wall_pressed = false
 		_start_ledge_detection()
 
-	var speed := SPRINT_SPEED if Input.is_action_pressed("sprint") else SPEED
+	var speed := CROUCH_SPEED if _is_crouching else (SPRINT_SPEED if Input.is_action_pressed("sprint") else SPEED)
 	var input_dir := Input.get_vector("move_left", "move_right", "move_forward", "move_backward")
 
 	var cam_forward := camera_pivot.global_basis.z
@@ -119,7 +128,6 @@ func _physics_process(delta: float) -> void:
 			rotation.y = lerp_angle(rotation.y, atan2(_wall_normal.x, _wall_normal.z), delta * 10.0)
 
 	move_and_slide()
-	camera_pivot.global_position = global_position + Vector3(0, 1.5, 0)
 
 	# Detect wall contacts — collisions with roughly vertical surfaces
 	_wall_normal = Vector3.ZERO
@@ -212,7 +220,6 @@ func _process_ledge_grab(delta: float) -> void:
 
 	# Rise toward the ledge surface
 	global_position.y = lerpf(_ledge_start_y, _ledge_surface_y, _ledge_pull_t)
-	camera_pivot.global_position = global_position + Vector3(0, 1.5, 0)
 
 	# Box descends from head height to ground as character rises — visual "pull"
 	_ledge_detector.global_position = (global_position
@@ -301,10 +308,18 @@ func _update_animation(on_floor: bool) -> void:
 	var current := char_anim.current_animation
 	var horizontal_speed := Vector2(velocity.x, velocity.z).length()
 
-	# One frame after roll/land starts, begin blending locomotion in so they play simultaneously
-	if _pending_locomotion != "" and current in ["Roll", "Jump_Land"]:
+	# One frame after roll starts, begin blending locomotion in so they play simultaneously
+	if _pending_locomotion != "" and current == "Roll":
 		char_anim.play(_pending_locomotion, BLEND_ROLL_OUT)
 		_pending_locomotion = ""
+		return
+
+	# Blend walk into Jump_Land once the character starts to stand back up
+	if _pending_locomotion != "" and current == "Jump_Land":
+		var anim_len := char_anim.current_animation_length
+		if anim_len > 0.0 and char_anim.current_animation_position / anim_len >= LAND_WALK_BLEND_START:
+			char_anim.play(_pending_locomotion, BLEND_ROLL_OUT)
+			_pending_locomotion = ""
 		return
 
 	# Landed this frame
@@ -326,6 +341,13 @@ func _update_animation(on_floor: bool) -> void:
 
 	# Don't interrupt one-shot ground animations
 	if current in ["Jump_Start", "Jump_Land", "Roll"]:
+		return
+
+	# Crouch
+	if _is_crouching:
+		var target := "Crouch_Fwd" if horizontal_speed > 0.1 else "Crouch_Idle"
+		if current != target:
+			char_anim.play(target, BLEND_LOCOMOTION)
 		return
 
 	# Wall press

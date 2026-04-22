@@ -10,6 +10,6 @@
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.002202034, -0.040551662, -0.032541275)
 
 [node name="Player" parent="." unique_id=2032236155 instance=ExtResource("2_noarx")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -9.5940895, 3.3437839, -3.8594265)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -9.5940895, 3.3437839, -2.01369)
 
 [node name="PauseMenu" parent="." unique_id=459513685 instance=ExtResource("3_noarx")]
