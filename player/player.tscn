@@ -1,6 +1,7 @@
 [gd_scene format=3 uid="uid://d3b2i412gk408"]
 
 [ext_resource type="Script" uid="uid://cm02xeiburusy" path="res://player/player.gd" id="1_player"]
+[ext_resource type="PackedScene" uid="uid://dv564f7r7vucf" path="res://ual_1_standard.tscn" id="2_char"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_1"]
 radius = 0.4
@@ -13,5 +14,10 @@ script = ExtResource("1_player")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
 shape = SubResource("CapsuleShape3D_1")
 
-[node name="Camera3D" type="Camera3D" parent="." unique_id=93520389]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.7960389, 0)
+[node name="CameraPivot" type="Node3D" parent="." unique_id=234567890]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 0)
+
+[node name="Camera3D" type="Camera3D" parent="CameraPivot" unique_id=93520389]
+transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, -0.014539957, 0.01329875, -2.302438)
+
+[node name="CharacterMesh" parent="." unique_id=683406134 instance=ExtResource("2_char")]
