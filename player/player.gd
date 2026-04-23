@@ -3,6 +3,8 @@ extends CharacterBody3D
 const SPEED := 1.0
 const SPRINT_SPEED := 9.0
 const CROUCH_SPEED := 0.5
+const ACCELERATION := 6.0
+const DECELERATION := 8.0
 const JUMP_VELOCITY := 4.5
 const MOUSE_SENSITIVITY := 0.002
 
@@ -13,10 +15,18 @@ const BLEND_ROLL := 0.1
 const BLEND_ROLL_OUT := 0.5  # walk/sprint fades in over this duration while roll plays out
 const LAND_WALK_BLEND_START := 0.1  # fraction through Jump_Land when walk begins blending in
 const ATTACK_WALK_BLEND_START := 0.5  # fraction through attack when walk begins blending in
-const ATTACK_LUNGE_SPEED := 4.0
+const ATTACK_LUNGE_SPEED := 10.0
 const ATTACK_LUNGE_DECAY := 8.0
+const ATTACK_LUNGE_START := 0.2  # fraction through anim before lunge kicks in
 const BLEND_WALL_PRESS := 0.15
 const BLEND_ATTACK := 0.1
+
+const HOLSTER_POSITION := Vector3(0.135, 0.1, 0.03)
+const HOLSTER_ROTATION := Vector3(0.52, 5.14, 2.35)
+const SWORD_PENDULUM_FORCE := 2.0
+const SWORD_PENDULUM_GRAVITY := 12.0
+const SWORD_PENDULUM_DAMPING := 5.0
+const SWORD_PENDULUM_MAX_ANGLE := 0.4
 
 const HEAD_YAW_LIMIT  := PI / 3.0   # 60° left/right
 const HEAD_PITCH_LIMIT := PI / 4.0  # 45° up/down
@@ -37,8 +47,11 @@ var _pending_locomotion := ""  # locomotion anim to blend in one frame after rol
 var _is_crouching := false
 var _equipped_item: Node3D = null
 var _hand_attach: BoneAttachment3D = null
+var _hip_attach: BoneAttachment3D = null
+var _item_holstered := false
 var _is_attacking := false
 var _attack_lunge_vel := Vector3.ZERO
+var _pending_lunge_vel := Vector3.ZERO
 var _last_punch := ""
 var _wall_normal := Vector3.ZERO
 var _wall_pressed := false
@@ -51,6 +64,9 @@ var _ledge_start_y := 0.0
 var _ledge_pull_t := 0.0
 var _left_arm_ik: SkeletonIK3D = null
 var _right_arm_ik: SkeletonIK3D = null
+var _sword_swing := Vector2.ZERO
+var _sword_swing_vel := Vector2.ZERO
+var _prev_horizontal_vel := Vector3.ZERO
 
 func _ready() -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
@@ -64,6 +80,9 @@ func _ready() -> void:
 		_hand_attach = BoneAttachment3D.new()
 		_hand_attach.bone_name = "RightHand"
 		skeleton.add_child(_hand_attach)
+		_hip_attach = BoneAttachment3D.new()
+		_hip_attach.bone_name = "Hips"
+		skeleton.add_child(_hip_attach)
 	char_anim.animation_finished.connect(_on_animation_finished)
 	char_anim.mixer_applied.connect(_apply_head_look)
 	char_anim.play("Idle", BLEND_LOCOMOTION)
@@ -79,6 +98,36 @@ func try_pickup(item: Node3D) -> void:
 	item.rotation = Vector3(0.0, 0.0, -PI / 2)
 	_equipped_item = item
 
+func _holster_item() -> void:
+	_equipped_item.reparent(_hip_attach)
+	_equipped_item.position = HOLSTER_POSITION
+	_equipped_item.rotation = HOLSTER_ROTATION
+	_sword_swing = Vector2.ZERO
+	_sword_swing_vel = Vector2.ZERO
+	_prev_horizontal_vel = Vector3(velocity.x, 0.0, velocity.z)
+	_item_holstered = true
+
+func _draw_item() -> void:
+	_equipped_item.reparent(_hand_attach)
+	_equipped_item.position = Vector3(0.1, 0.1, 0.02)
+	_equipped_item.rotation = Vector3(0.0, 0.0, -PI / 2)
+	_sword_swing = Vector2.ZERO
+	_sword_swing_vel = Vector2.ZERO
+	_item_holstered = false
+
+func _update_sword_pendulum(delta: float) -> void:
+	var cur_vel := Vector3(velocity.x, 0.0, velocity.z)
+	var accel := (cur_vel - _prev_horizontal_vel) / delta
+	_prev_horizontal_vel = cur_vel
+	var local_accel := global_transform.basis.inverse() * accel
+	_sword_swing_vel.x -= local_accel.x * SWORD_PENDULUM_FORCE * delta
+	_sword_swing_vel.y -= local_accel.z * SWORD_PENDULUM_FORCE * delta
+	_sword_swing_vel -= _sword_swing * SWORD_PENDULUM_GRAVITY * delta
+	_sword_swing_vel *= maxf(0.0, 1.0 - SWORD_PENDULUM_DAMPING * delta)
+	_sword_swing += _sword_swing_vel * delta
+	_sword_swing = _sword_swing.clamp(Vector2.ONE * -SWORD_PENDULUM_MAX_ANGLE, Vector2.ONE * SWORD_PENDULUM_MAX_ANGLE)
+	_equipped_item.rotation = HOLSTER_ROTATION + Vector3(_sword_swing.y, 0.0, _sword_swing.x)
+
 func _on_animation_finished(anim_name: String) -> void:
 	match anim_name:
 		"Jump_Start":
@@ -92,6 +141,8 @@ func _on_animation_finished(anim_name: String) -> void:
 		"Sword_Attack", "Punch_Cross", "Punch_Jab":
 			_pending_locomotion = ""
 			_is_attacking = false
+			velocity.x = 0.0
+			velocity.z = 0.0
 			_play_locomotion()
 
 func _start_attack(anim_name: String) -> void:
@@ -99,7 +150,8 @@ func _start_attack(anim_name: String) -> void:
 	if anim:
 		anim.loop_mode = Animation.LOOP_NONE
 	_is_attacking = true
-	_attack_lunge_vel = global_transform.basis.z * ATTACK_LUNGE_SPEED
+	_attack_lunge_vel = Vector3.ZERO
+	_pending_lunge_vel = Vector3.ZERO if anim_name in ["Punch_Jab", "Punch_Cross"] else global_transform.basis.z * ATTACK_LUNGE_SPEED
 	var horizontal_speed := Vector2(velocity.x, velocity.z).length()
 	if horizontal_speed > 0.1:
 		_pending_locomotion = "Sprint" if Input.is_action_pressed("sprint") else "Walk"
@@ -123,11 +175,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		camera_pivot.rotation.y -= event.relative.x * MOUSE_SENSITIVITY
 		camera_pivot.rotation.x -= event.relative.y * MOUSE_SENSITIVITY
 		camera_pivot.rotation.x = clampf(camera_pivot.rotation.x, -PI * 0.5, PI * 0.5)
+	if event is InputEventKey and event.keycode == KEY_X and event.pressed and not event.echo:
+		if _equipped_item and not _item_holstered:
+			_holster_item()
+		elif _equipped_item and _item_holstered:
+			_draw_item()
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		if not _is_attacking:
 			var cur := char_anim.current_animation
 			if cur not in ["Jump_Start", "Jump", "Roll", "Jump_Land"]:
-				_start_attack("Sword_Attack" if _equipped_item else _next_punch())
+				_start_attack("Sword_Attack" if (_equipped_item and not _item_holstered) else _next_punch())
 
 func _physics_process(delta: float) -> void:
 	if _ledge_grab_active:
@@ -150,6 +207,11 @@ func _physics_process(delta: float) -> void:
 
 	var direction := Vector3.ZERO
 	if _is_attacking:
+		if _pending_lunge_vel != Vector3.ZERO:
+			var anim_len := char_anim.current_animation_length
+			if anim_len > 0.0 and char_anim.current_animation_position / anim_len >= ATTACK_LUNGE_START:
+				_attack_lunge_vel = _pending_lunge_vel
+				_pending_lunge_vel = Vector3.ZERO
 		velocity.x = lerpf(velocity.x, _attack_lunge_vel.x, delta * ATTACK_LUNGE_DECAY)
 		velocity.z = lerpf(velocity.z, _attack_lunge_vel.z, delta * ATTACK_LUNGE_DECAY)
 		_attack_lunge_vel = _attack_lunge_vel.lerp(Vector3.ZERO, delta * ATTACK_LUNGE_DECAY)
@@ -166,16 +228,16 @@ func _physics_process(delta: float) -> void:
 		direction = (cam_right * input_dir.x + cam_forward * -input_dir.y).normalized()
 
 		if direction:
-			velocity.x = direction.x * speed
-			velocity.z = direction.z * speed
+			velocity.x = lerpf(velocity.x, direction.x * speed, delta * ACCELERATION)
+			velocity.z = lerpf(velocity.z, direction.z * speed, delta * ACCELERATION)
 			if _wall_pressed and direction.dot(-_wall_normal) > 0.3:
 				# Pushing into wall — lock back-to-wall so the character doesn't face it head-on
 				rotation.y = lerp_angle(rotation.y, atan2(_wall_normal.x, _wall_normal.z), delta * 10.0)
 			else:
 				rotation.y = lerp_angle(rotation.y, atan2(direction.x, direction.z), delta * 8.0)
 		else:
-			velocity.x = move_toward(velocity.x, 0, speed)
-			velocity.z = move_toward(velocity.z, 0, speed)
+			velocity.x = lerpf(velocity.x, 0.0, delta * DECELERATION)
+			velocity.z = lerpf(velocity.z, 0.0, delta * DECELERATION)
 			if _wall_pressed:
 				rotation.y = lerp_angle(rotation.y, atan2(_wall_normal.x, _wall_normal.z), delta * 10.0)
 
@@ -211,6 +273,9 @@ func _physics_process(delta: float) -> void:
 
 	_update_animation(on_floor)
 	_was_on_floor = on_floor
+
+	if _item_holstered and _equipped_item:
+		_update_sword_pendulum(delta)
 
 func _start_ledge_detection() -> void:
 	_ledge_reachable = false
@@ -364,6 +429,7 @@ func _update_animation(on_floor: bool) -> void:
 		_pending_locomotion = ""
 		_is_attacking = false
 		_attack_lunge_vel = Vector3.ZERO
+		_pending_lunge_vel = Vector3.ZERO
 
 	# One frame after roll starts, begin blending locomotion in so they play simultaneously
 	if _pending_locomotion != "" and current == "Roll":
