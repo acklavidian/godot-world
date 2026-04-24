@@ -8,19 +8,11 @@ const DECELERATION := 8.0
 const JUMP_VELOCITY := 4.5
 const MOUSE_SENSITIVITY := 0.002
 
-const BLEND_LOCOMOTION := 0.2
-const BLEND_JUMP := 0.15
-const BLEND_LAND := 0.2
-const BLEND_ROLL := 0.1
-const BLEND_ROLL_OUT := 0.5  # walk/sprint fades in over this duration while roll plays out
-const LAND_WALK_BLEND_START := 0.1  # fraction through Jump_Land when walk begins blending in
-const ATTACK_WALK_BLEND_START := 0.5  # fraction through attack when walk begins blending in
+const LAND_WALK_BLEND_START := 0.1
+const ATTACK_WALK_BLEND_START := 0.5
 const ATTACK_LUNGE_SPEED := 10.0
 const ATTACK_LUNGE_DECAY := 8.0
 const ATTACK_LUNGE_START := 0.2  # fraction through anim before lunge kicks in
-const BLEND_WALL_PRESS := 0.15
-const BLEND_ATTACK := 0.1
-
 const HOLSTER_POSITION := Vector3(0.135, 0.1, 0.03)
 const HOLSTER_ROTATION := Vector3(0.52, 5.14, 2.35)
 const SWORD_PENDULUM_FORCE := 2.0
@@ -35,7 +27,12 @@ const LEDGE_CLIMB_SPEED := 2.0
 
 @onready var camera_pivot: Node3D = $CameraPivot
 
-var char_anim: AnimationPlayer
+const ATTACK_STATES := ["Sword_Attack", "Punch_Jab", "Punch_Cross"]
+
+var char_anim: AnimationPlayer  # kept for get_animation() and ledge-grab reversed play
+var anim_tree: AnimationTree
+var anim_playback: AnimationNodeStateMachinePlayback
+var jump_playback: AnimationNodeStateMachinePlayback
 var skeleton: Skeleton3D
 var _head_bone: int = -1
 var _head_look_rot := Quaternion.IDENTITY
@@ -43,7 +40,9 @@ var _spine_bone: int = -1
 var _spine_yaw := 0.0
 var _smooth_wall_angle := 0.0
 var _was_on_floor := true
-var _pending_locomotion := ""  # locomotion anim to blend in one frame after roll starts
+var _pending_return := false
+var _pending_land := false
+var _pending_locomotion := false
 var _is_crouching := false
 var _equipped_item: Node3D = null
 var _hand_attach: BoneAttachment3D = null
@@ -71,6 +70,9 @@ var _prev_horizontal_vel := Vector3.ZERO
 func _ready() -> void:
 	Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
 	char_anim = $CharacterMesh.find_child("AnimationPlayer", true, false) as AnimationPlayer
+	anim_tree = $CharacterMesh.find_child("AnimationTree", true, false) as AnimationTree
+	anim_playback = anim_tree.get("parameters/playback") as AnimationNodeStateMachinePlayback
+	jump_playback = anim_tree.get("parameters/Jump/playback") as AnimationNodeStateMachinePlayback
 	skeleton = $CharacterMesh.find_child("GeneralSkeleton", true, false) as Skeleton3D
 	if skeleton:
 		_head_bone = skeleton.find_bone("Head")
@@ -83,9 +85,8 @@ func _ready() -> void:
 		_hip_attach = BoneAttachment3D.new()
 		_hip_attach.bone_name = "Hips"
 		skeleton.add_child(_hip_attach)
-	char_anim.animation_finished.connect(_on_animation_finished)
-	char_anim.mixer_applied.connect(_apply_head_look)
-	char_anim.play("Idle", BLEND_LOCOMOTION)
+	anim_tree.animation_finished.connect(_on_animation_finished)
+	anim_tree.mixer_applied.connect(_apply_head_look)
 	camera_pivot.top_level = true
 	camera_pivot.global_position = global_position + Vector3(0, 1.5, 0)
 
@@ -93,6 +94,11 @@ func try_pickup(item: Node3D) -> void:
 	if _equipped_item:
 		return
 	item.disable_pickup()
+	call_deferred("_finish_pickup", item)
+
+func _finish_pickup(item: Node3D) -> void:
+	if _equipped_item or not is_instance_valid(item):
+		return
 	item.reparent(_hand_attach)
 	item.position = Vector3(0.1, 0.1, 0.02)
 	item.rotation = Vector3(0.0, 0.0, -PI / 2)
@@ -130,20 +136,15 @@ func _update_sword_pendulum(delta: float) -> void:
 
 func _on_animation_finished(anim_name: String) -> void:
 	match anim_name:
-		"Jump_Start":
-			char_anim.play("Jump", BLEND_JUMP)
-		"Jump_Land":
-			_pending_locomotion = ""
-			_play_locomotion()
-		"Roll":
-			_pending_locomotion = ""
-			_play_locomotion()
+		"Jump_Land", "Roll":
+			_pending_return = false
+			_pending_locomotion = true
 		"Sword_Attack", "Punch_Cross", "Punch_Jab":
-			_pending_locomotion = ""
+			_pending_return = false
 			_is_attacking = false
 			velocity.x = 0.0
 			velocity.z = 0.0
-			_play_locomotion()
+			_pending_locomotion = true
 
 func _start_attack(anim_name: String) -> void:
 	var anim := char_anim.get_animation(anim_name)
@@ -152,20 +153,26 @@ func _start_attack(anim_name: String) -> void:
 	_is_attacking = true
 	_attack_lunge_vel = Vector3.ZERO
 	_pending_lunge_vel = Vector3.ZERO if anim_name in ["Punch_Jab", "Punch_Cross"] else global_transform.basis.z * ATTACK_LUNGE_SPEED
-	var horizontal_speed := Vector2(velocity.x, velocity.z).length()
-	if horizontal_speed > 0.1:
-		_pending_locomotion = "Sprint" if Input.is_action_pressed("sprint") else "Walk"
-	char_anim.play(anim_name, BLEND_ATTACK)
+	if Vector2(velocity.x, velocity.z).length() > 0.1:
+		_pending_return = true
+	_pending_locomotion = false
+	anim_tree["parameters/conditions/do_locomotion"] = false
+	anim_playback.travel(anim_name)
 
 func _next_punch() -> String:
 	_last_punch = "Punch_Jab" if _last_punch == "Punch_Cross" else "Punch_Cross"
 	return _last_punch
 
 func _play_locomotion() -> void:
-	var horizontal_speed := Vector2(velocity.x, velocity.z).length()
-	var target := "Sprint" if (horizontal_speed > 0.1 and Input.is_action_pressed("sprint")) else ("Walk" if horizontal_speed > 0.1 else "Idle")
-	if char_anim.current_animation != target:
-		char_anim.play(target, BLEND_LOCOMOTION)
+	anim_tree.set("parameters/Locomotion/blend_position", Vector2(velocity.x, velocity.z).length())
+	anim_tree["parameters/conditions/do_locomotion"] = true
+
+func _reset_conditions() -> void:
+	anim_tree["parameters/conditions/do_jump"] = false
+	anim_tree["parameters/conditions/do_roll"] = false
+	anim_tree["parameters/conditions/do_locomotion"] = false
+	anim_tree["parameters/conditions/do_crouch"] = false
+	anim_tree["parameters/Jump/conditions/do_land"] = false
 
 func _process(_delta: float) -> void:
 	camera_pivot.global_position = global_position + Vector3(0, 1.5, 0)
@@ -182,11 +189,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			_draw_item()
 	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
 		if not _is_attacking:
-			var cur := char_anim.current_animation
-			if cur not in ["Jump_Start", "Jump", "Roll", "Jump_Land"]:
+			var cur := anim_playback.get_current_node()
+			if cur not in ["Jump", "Roll"]:
 				_start_attack("Sword_Attack" if (_equipped_item and not _item_holstered) else _next_punch())
 
 func _physics_process(delta: float) -> void:
+	_reset_conditions()
 	if _ledge_grab_active:
 		_process_ledge_grab(delta)
 		return
@@ -201,15 +209,15 @@ func _physics_process(delta: float) -> void:
 	if Input.is_action_just_pressed("jump") and on_floor and not Input.is_key_pressed(KEY_CTRL):
 		_is_attacking = false
 		velocity.y = JUMP_VELOCITY
-		char_anim.play("Jump_Start", BLEND_JUMP)
+		anim_tree["parameters/conditions/do_jump"] = true
 		_wall_pressed = false
 		_start_ledge_detection()
 
 	var direction := Vector3.ZERO
 	if _is_attacking:
 		if _pending_lunge_vel != Vector3.ZERO:
-			var anim_len := char_anim.current_animation_length
-			if anim_len > 0.0 and char_anim.current_animation_position / anim_len >= ATTACK_LUNGE_START:
+			var anim_len := anim_playback.get_current_length()
+			if anim_len > 0.0 and anim_playback.get_current_play_position() / anim_len >= ATTACK_LUNGE_START:
 				_attack_lunge_vel = _pending_lunge_vel
 				_pending_lunge_vel = Vector3.ZERO
 		velocity.x = lerpf(velocity.x, _attack_lunge_vel.x, delta * ATTACK_LUNGE_DECAY)
@@ -255,7 +263,6 @@ func _physics_process(delta: float) -> void:
 	if _wall_normal != Vector3.ZERO:
 		_smooth_wall_angle = lerp_angle(_smooth_wall_angle, atan2(_wall_normal.x, _wall_normal.z), delta * 20.0)
 
-	# Wall press state transitions
 	if _wall_pressed:
 		if _wall_normal == Vector3.ZERO or not on_floor:
 			_wall_pressed = false
@@ -330,7 +337,12 @@ func _initiate_ledge_grab() -> void:
 	_ledge_grab_active   = true
 	_wall_pressed        = false
 	velocity             = Vector3.ZERO
-	char_anim.play("Crouch", 0.15, -1.0, true)  # reversed: crouch→stand reads as pull-up
+	# Plays the Crouch animation backwards (stand→crouch reversed = pull-up).
+	# The AnimationTree state machine needs a "Ledge_Climb" state with Crouch playing backward,
+	# or keep this direct AnimationPlayer call while disabling the tree temporarily.
+	anim_tree.active = false
+	char_anim.play("Crouch", 0.15, -1.0, true)
+	char_anim.animation_finished.connect(_on_ledge_anim_finished, CONNECT_ONE_SHOT)
 
 func _process_ledge_grab(delta: float) -> void:
 	_ledge_pull_t = minf(_ledge_pull_t + delta * LEDGE_CLIMB_SPEED, 1.0)
@@ -348,11 +360,15 @@ func _process_ledge_grab(delta: float) -> void:
 	if _ledge_pull_t >= 1.0:
 		_finish_ledge_grab()
 
+func _on_ledge_anim_finished(_anim_name: String) -> void:
+	anim_tree.active = true
+
 func _finish_ledge_grab() -> void:
 	_clear_hand_overrides()
 	_ledge_grab_active = false
 	global_position += global_transform.basis.z * 0.4  # step forward onto ledge
 	_stop_ledge_detection()
+	anim_tree.active = true
 	_play_locomotion()
 
 func _make_arm_ik(root_bone: String, tip_bone: String) -> SkeletonIK3D:
@@ -405,10 +421,8 @@ func _apply_head_look() -> void:
 	# Build rotation in parent-bone-local space (assumed roughly aligned with body)
 	var target := Quaternion(Vector3.UP, yaw) * Quaternion(Vector3.RIGHT, pitch)
 
-	# Smooth toward target
 	_head_look_rot = _head_look_rot.slerp(target, delta * 8.0)
-
-	# Apply on top of whatever the animation set this frame
+	# multiply with anim pose so head look stacks on top of the current frame
 	skeleton.set_bone_pose_rotation(_head_bone, _head_look_rot * skeleton.get_bone_pose_rotation(_head_bone))
 
 	# Spine counter-rotation: upper body stays facing away from wall while hips follow movement.
@@ -422,79 +436,84 @@ func _apply_head_look() -> void:
 		skeleton.set_bone_pose_rotation(_spine_bone, Quaternion(Vector3.UP, _spine_yaw))
 
 func _update_animation(on_floor: bool) -> void:
-	var current := char_anim.current_animation
+	if _pending_locomotion:
+		anim_tree.set("parameters/Locomotion/blend_position", Vector2(velocity.x, velocity.z).length())
+		anim_tree["parameters/conditions/do_locomotion"] = true
+		_pending_locomotion = false
+
+	var root_node := anim_playback.get_current_node()
 	var horizontal_speed := Vector2(velocity.x, velocity.z).length()
 
-	if _is_attacking and current not in ["Sword_Attack", "Punch_Cross", "Punch_Jab"]:
-		_pending_locomotion = ""
+	anim_tree.set("parameters/Locomotion/blend_position", horizontal_speed)
+	anim_tree.set("parameters/Crouch/blend_position", horizontal_speed)
+
+	if _is_attacking and root_node not in ATTACK_STATES:
+		_pending_return = false
 		_is_attacking = false
 		_attack_lunge_vel = Vector3.ZERO
 		_pending_lunge_vel = Vector3.ZERO
 
-	# One frame after roll starts, begin blending locomotion in so they play simultaneously
-	if _pending_locomotion != "" and current == "Roll":
-		char_anim.play(_pending_locomotion, BLEND_ROLL_OUT)
-		_pending_locomotion = ""
+	# Begin locomotion blend-in as Roll exits (crossfade handles the visual)
+	if _pending_return and root_node == "Roll":
+		anim_tree["parameters/conditions/do_locomotion"] = true
+		_pending_return = false
 		return
 
-	# Blend walk into Jump_Land once the character starts to stand back up
-	if _pending_locomotion != "" and current == "Jump_Land":
-		var anim_len := char_anim.current_animation_length
-		if anim_len > 0.0 and char_anim.current_animation_position / anim_len >= LAND_WALK_BLEND_START:
-			char_anim.play(_pending_locomotion, BLEND_ROLL_OUT)
-			_pending_locomotion = ""
+	if root_node == "Jump":
+		var sub_node := jump_playback.get_current_node()
+		# Landing must be detected inside the Jump block — we return early here
+		if not _was_on_floor and on_floor:
+			if horizontal_speed > 1.0:
+				_pending_return = true
+				anim_tree["parameters/conditions/do_roll"] = true
+			else:
+				if horizontal_speed > 0.1:
+					_pending_return = true
+				_pending_land = true
+			return
+		if _pending_land:
+			if sub_node == "Jump":
+				anim_tree["parameters/Jump/conditions/do_land"] = true
+			elif sub_node == "Jump_Land":
+				_pending_land = false
+		if _pending_return and sub_node == "Jump_Land":
+			var anim_len := jump_playback.get_current_length()
+			if anim_len > 0.0 and jump_playback.get_current_play_position() / anim_len >= LAND_WALK_BLEND_START:
+				anim_tree["parameters/conditions/do_locomotion"] = true
+				_pending_return = false
 		return
 
-	# Blend walk back in during the second half of an attack
-	if _pending_locomotion != "" and current in ["Sword_Attack", "Punch_Cross", "Punch_Jab"]:
-		var anim_len := char_anim.current_animation_length
-		if anim_len > 0.0 and char_anim.current_animation_position / anim_len >= ATTACK_WALK_BLEND_START:
-			char_anim.play(_pending_locomotion, BLEND_ROLL_OUT)
-			_pending_locomotion = ""
+	if _pending_return and root_node in ATTACK_STATES:
+		var anim_len := anim_playback.get_current_length()
+		if anim_len > 0.0 and anim_playback.get_current_play_position() / anim_len >= ATTACK_WALK_BLEND_START:
+			anim_tree["parameters/conditions/do_locomotion"] = true
+			_pending_return = false
 		return
 
-	# Landed this frame
 	if not _was_on_floor and on_floor:
 		if horizontal_speed > 1.0:
-			_pending_locomotion = "Sprint" if Input.is_action_pressed("sprint") else "Walk"
-			char_anim.play("Roll", BLEND_ROLL)
+			_pending_return = true
+			anim_tree["parameters/conditions/do_roll"] = true
 		else:
 			if horizontal_speed > 0.1:
-				_pending_locomotion = "Sprint" if Input.is_action_pressed("sprint") else "Walk"
-			char_anim.play("Jump_Land", BLEND_LAND)
+				_pending_return = true
+			anim_tree["parameters/conditions/do_jump"] = true
+			_pending_land = true
 		return
 
-	# In air — don't override Jump_Start; it transitions via signal
 	if not on_floor:
-		if current not in ["Jump_Start", "Jump"]:
-			char_anim.play("Jump", BLEND_JUMP)
+		if root_node != "Jump":
+			anim_tree["parameters/conditions/do_jump"] = true
 		return
 
-	# Don't interrupt one-shot ground animations
-	if current in ["Jump_Start", "Jump_Land", "Roll", "Sword_Attack", "Punch_Cross", "Punch_Jab"]:
+	# Don't interrupt one-shot states
+	if root_node in ["Jump", "Roll"] or root_node in ATTACK_STATES:
 		return
 
-	# Crouch
 	if _is_crouching:
-		var target := "Crouch_Fwd" if horizontal_speed > 0.1 else "Crouch_Idle"
-		if current != target:
-			char_anim.play(target, BLEND_LOCOMOTION)
+		if root_node != "Crouch":
+			anim_tree["parameters/conditions/do_crouch"] = true
 		return
 
-	# Wall press
-	if _wall_pressed:
-		if horizontal_speed > 0.1:
-			var target := "Sprint" if Input.is_action_pressed("sprint") else "Walk"
-			if current != target:
-				char_anim.play(target, BLEND_WALL_PRESS)
-		elif current != "Idle":
-			char_anim.play("Idle", BLEND_WALL_PRESS)
-		return
-
-	# Locomotion
-	if horizontal_speed > 0.1:
-		var target := "Sprint" if Input.is_action_pressed("sprint") else "Walk"
-		if current != target:
-			char_anim.play(target, BLEND_LOCOMOTION)
-	elif current != "Idle":
-		char_anim.play("Idle", BLEND_LOCOMOTION)
+	if root_node != "Locomotion":
+		anim_tree["parameters/conditions/do_locomotion"] = true

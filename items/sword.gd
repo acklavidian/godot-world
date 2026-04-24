@@ -59,5 +59,5 @@ func disable_pickup() -> void:
 	_pickup_enabled = false
 	var area := get_node_or_null("PickupArea")
 	if area:
-		area.monitoring = false
-		area.monitorable = false
+		area.set_deferred("monitoring", false)
+		area.set_deferred("monitorable", false)
