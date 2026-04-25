@@ -2,13 +2,15 @@
 
 [ext_resource type="Script" uid="uid://cm02xeiburusy" path="res://player/player.gd" id="1_player"]
 [ext_resource type="PackedScene" uid="uid://dv564f7r7vucf" path="res://ual_1_standard.tscn" id="2_char"]
+[ext_resource type="Script" uid="uid://bm33rmt4nypkx" path="res://player/wall_shadow.gd" id="3_g1dw6"]
 
 [sub_resource type="CapsuleShape3D" id="CapsuleShape3D_1"]
 radius = 0.4
 height = 1.8
 
-[node name="Player" type="CharacterBody3D" unique_id=1267164652]
+[node name="Player" type="CharacterBody3D" unique_id=1267164652 node_paths=PackedStringArray("wall_shadow")]
 script = ExtResource("1_player")
+wall_shadow = NodePath("WallShadow")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="." unique_id=1446609028]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
@@ -21,3 +23,6 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.5, 0)
 transform = Transform3D(-1, 0, -8.742278e-08, 0, 1, 0, 8.742278e-08, 0, -1, -0.014539957, 0.01329875, -2.302438)
 
 [node name="CharacterMesh" parent="." unique_id=683406134 instance=ExtResource("2_char")]
+
+[node name="WallShadow" type="Node3D" parent="." unique_id=1295686277]
+script = ExtResource("3_g1dw6")

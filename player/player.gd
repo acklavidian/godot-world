@@ -2,7 +2,7 @@ extends CharacterBody3D
 
 const SPEED := 1.0
 const SPRINT_SPEED := 9.0
-const CROUCH_SPEED := 0.5
+const CROUCH_SPEED := 0.75
 const ACCELERATION := 6.0
 const DECELERATION := 8.0
 const JUMP_VELOCITY := 4.5
@@ -20,12 +20,18 @@ const SWORD_PENDULUM_GRAVITY := 12.0
 const SWORD_PENDULUM_DAMPING := 5.0
 const SWORD_PENDULUM_MAX_ANGLE := 0.4
 
+const ROLL_SPEED_THRESHOLD   := 2.5
+const ROLL_SPRINT_CUTOFF     := 0.91
+const ROLL_CROUCH_CUTOFF     := 0.8
+const ROLL_DAMPEN_START_FRAC := 0.3   # last 70% of the roll gets dampened
+
 const HEAD_YAW_LIMIT  := PI / 3.0   # 60° left/right
 const HEAD_PITCH_LIMIT := PI / 4.0  # 45° up/down
 const HIP_YAW_LIMIT   := PI / 2.0  # 90° hip twist while wall-sliding
 const LEDGE_CLIMB_SPEED := 2.0
 
 @onready var camera_pivot: Node3D = $CameraPivot
+@export var wall_shadow: Node
 
 const ATTACK_STATES := ["Sword_Attack", "Punch_Jab", "Punch_Cross"]
 
@@ -40,9 +46,11 @@ var _spine_bone: int = -1
 var _spine_yaw := 0.0
 var _smooth_wall_angle := 0.0
 var _was_on_floor := true
+var _ctrl_held_prev := false
 var _pending_return := false
 var _pending_land := false
 var _pending_locomotion := false
+var _pending_crouch := false
 var _is_crouching := false
 var _equipped_item: Node3D = null
 var _hand_attach: BoneAttachment3D = null
@@ -63,6 +71,8 @@ var _ledge_start_y := 0.0
 var _ledge_pull_t := 0.0
 var _left_arm_ik: SkeletonIK3D = null
 var _right_arm_ik: SkeletonIK3D = null
+var _left_hand_target: Node3D = null
+var _right_hand_target: Node3D = null
 var _sword_swing := Vector2.ZERO
 var _sword_swing_vel := Vector2.ZERO
 var _prev_horizontal_vel := Vector3.ZERO
@@ -79,6 +89,12 @@ func _ready() -> void:
 		_spine_bone = skeleton.find_bone("Spine")
 		_left_arm_ik = _make_arm_ik("LeftUpperArm", "LeftHand")
 		_right_arm_ik = _make_arm_ik("RightUpperArm", "RightHand")
+		_left_hand_target = Node3D.new()
+		_right_hand_target = Node3D.new()
+		add_child(_left_hand_target)
+		add_child(_right_hand_target)
+		_left_arm_ik.target_node = _left_hand_target.get_path()
+		_right_arm_ik.target_node = _right_hand_target.get_path()
 		_hand_attach = BoneAttachment3D.new()
 		_hand_attach.bone_name = "RightHand"
 		skeleton.add_child(_hand_attach)
@@ -136,9 +152,15 @@ func _update_sword_pendulum(delta: float) -> void:
 
 func _on_animation_finished(anim_name: String) -> void:
 	match anim_name:
-		"Jump_Land", "Roll":
+		"Jump_Land":
 			_pending_return = false
 			_pending_locomotion = true
+		"Roll":
+			_pending_return = false
+			if _is_crouching:
+				_pending_crouch = true
+			else:
+				_pending_locomotion = true
 		"Sword_Attack", "Punch_Cross", "Punch_Jab":
 			_pending_return = false
 			_is_attacking = false
@@ -153,6 +175,8 @@ func _start_attack(anim_name: String) -> void:
 	_is_attacking = true
 	_attack_lunge_vel = Vector3.ZERO
 	_pending_lunge_vel = Vector3.ZERO if anim_name in ["Punch_Jab", "Punch_Cross"] else global_transform.basis.z * ATTACK_LUNGE_SPEED
+	velocity.x = 0.0
+	velocity.z = 0.0
 	if Vector2(velocity.x, velocity.z).length() > 0.1:
 		_pending_return = true
 	_pending_locomotion = false
@@ -204,7 +228,17 @@ func _physics_process(delta: float) -> void:
 	if not on_floor:
 		velocity += get_gravity() * delta
 
-	_is_crouching = Input.is_key_pressed(KEY_CTRL) and on_floor
+	var ctrl_held := Input.is_key_pressed(KEY_CTRL)
+	var ctrl_just := ctrl_held and not _ctrl_held_prev
+	_ctrl_held_prev = ctrl_held
+	_is_crouching = ctrl_held and on_floor
+
+	var h_spd := Vector2(velocity.x, velocity.z).length()
+	if ctrl_just and on_floor and h_spd >= ROLL_SPEED_THRESHOLD and not _is_attacking:
+		var cur := anim_playback.get_current_node()
+		if cur != "Roll" and cur != "Jump" and cur not in ATTACK_STATES:
+			anim_tree["parameters/conditions/do_roll"] = true
+			_is_crouching = false
 
 	if Input.is_action_just_pressed("jump") and on_floor and not Input.is_key_pressed(KEY_CTRL):
 		_is_attacking = false
@@ -235,19 +269,19 @@ func _physics_process(delta: float) -> void:
 		cam_right = cam_right.normalized()
 		direction = (cam_right * input_dir.x + cam_forward * -input_dir.y).normalized()
 
+		if anim_playback.get_current_node() == "Roll":
+			var rpos := anim_playback.get_current_play_position()
+			var cutoff := ROLL_CROUCH_CUTOFF if _is_crouching else ROLL_SPRINT_CUTOFF
+			var t := clampf((rpos / cutoff - ROLL_DAMPEN_START_FRAC) / (1.0 - ROLL_DAMPEN_START_FRAC), 0.0, 1.0)
+			var exit_speed := CROUCH_SPEED if _is_crouching else SPEED
+			speed = lerpf(SPRINT_SPEED, exit_speed, t * t * t)
 		if direction:
 			velocity.x = lerpf(velocity.x, direction.x * speed, delta * ACCELERATION)
 			velocity.z = lerpf(velocity.z, direction.z * speed, delta * ACCELERATION)
-			if _wall_pressed and direction.dot(-_wall_normal) > 0.3:
-				# Pushing into wall — lock back-to-wall so the character doesn't face it head-on
-				rotation.y = lerp_angle(rotation.y, atan2(_wall_normal.x, _wall_normal.z), delta * 10.0)
-			else:
-				rotation.y = lerp_angle(rotation.y, atan2(direction.x, direction.z), delta * 8.0)
+			rotation.y = lerp_angle(rotation.y, atan2(direction.x, direction.z), delta * 8.0)
 		else:
 			velocity.x = lerpf(velocity.x, 0.0, delta * DECELERATION)
 			velocity.z = lerpf(velocity.z, 0.0, delta * DECELERATION)
-			if _wall_pressed:
-				rotation.y = lerp_angle(rotation.y, atan2(_wall_normal.x, _wall_normal.z), delta * 10.0)
 
 	move_and_slide()
 
@@ -271,6 +305,12 @@ func _physics_process(delta: float) -> void:
 	elif _wall_normal != Vector3.ZERO and on_floor and direction != Vector3.ZERO:
 		if direction.dot(-_wall_normal) > 0.5:  # pushing into wall
 			_wall_pressed = true
+
+	if is_instance_valid(wall_shadow):
+		if _wall_pressed:
+			wall_shadow.activate(global_position, _wall_normal)
+		else:
+			wall_shadow.deactivate()
 
 	if _ledge_detector:
 		if on_floor and not _was_on_floor:
@@ -350,6 +390,12 @@ func _process_ledge_grab(delta: float) -> void:
 	# Rise toward the ledge surface
 	global_position.y = lerpf(_ledge_start_y, _ledge_surface_y, _ledge_pull_t)
 
+	# Press chest against wall — project the character's center to capsule-radius distance
+	# from the ledge surface so the body slides flush against the wall as it rises.
+	var fwd := global_transform.basis.z
+	var wall_d := _ledge_contact_point.dot(fwd) - 0.4
+	global_position += fwd * (wall_d - global_position.dot(fwd))
+
 	# Box descends from head height to ground as character rises — visual "pull"
 	_ledge_detector.global_position = (global_position
 		+ Vector3(0, 1.6 * (1.0 - _ledge_pull_t), 0)
@@ -385,16 +431,25 @@ func _make_arm_ik(root_bone: String, tip_bone: String) -> SkeletonIK3D:
 func _apply_hand_ik(t: float) -> void:
 	if skeleton == null:
 		return
-	var weight := minf(t * 4.0, 1.0)
-	var right := global_transform.basis.x
-	var skel_inv := skeleton.global_transform.affine_inverse()
-	if _left_arm_ik:
-		var wp := _ledge_contact_point - right * 0.2
-		_left_arm_ik.target = skel_inv * Transform3D(Basis.IDENTITY, wp)
+	# Fade in, hold through mid-climb, fade out before the character clears the ledge
+	# so the IK doesn't drag the hands downward once the character has risen above the contact point.
+	var weight := smoothstep(0.0, 0.2, t) * (1.0 - smoothstep(0.6, 0.85, t))
+	var skel_xform := skeleton.global_transform
+	var skel_inv   := skel_xform.affine_inverse()
+	# Derive the true lateral axis from the skeleton itself — basis.x is unreliable
+	# because the character mesh may have been imported with a different facing convention.
+	var l_shoulder := (skel_xform * skeleton.get_bone_global_pose(skeleton.find_bone("LeftUpperArm"))).origin
+	var r_shoulder := (skel_xform * skeleton.get_bone_global_pose(skeleton.find_bone("RightUpperArm"))).origin
+	var to_right   := (r_shoulder - l_shoulder).normalized()
+	var half_span  := (r_shoulder - l_shoulder).length() * 1.5
+	var hand_offset := Vector3.DOWN * 0.06
+	if _left_hand_target and _left_arm_ik:
+		_left_hand_target.global_position = _ledge_contact_point - to_right * half_span + hand_offset
+		_left_arm_ik.magnet   = skel_inv * (l_shoulder - to_right * 0.3)
 		_left_arm_ik.interpolation = weight
-	if _right_arm_ik:
-		var wp := _ledge_contact_point + right * 0.2
-		_right_arm_ik.target = skel_inv * Transform3D(Basis.IDENTITY, wp)
+	if _right_hand_target and _right_arm_ik:
+		_right_hand_target.global_position = _ledge_contact_point + to_right * half_span + hand_offset
+		_right_arm_ik.magnet   = skel_inv * (r_shoulder + to_right * 0.3)
 		_right_arm_ik.interpolation = weight
 
 func _clear_hand_overrides() -> void:
@@ -425,21 +480,19 @@ func _apply_head_look() -> void:
 	# multiply with anim pose so head look stacks on top of the current frame
 	skeleton.set_bone_pose_rotation(_head_bone, _head_look_rot * skeleton.get_bone_pose_rotation(_head_bone))
 
-	# Spine counter-rotation: upper body stays facing away from wall while hips follow movement.
-	if _spine_bone >= 0:
-		var target_yaw := 0.0
-		if _wall_pressed and _wall_normal != Vector3.ZERO and Vector2(velocity.x, velocity.z).length() > 0.1:
-			# atan2(sin,cos) gives angle difference in (-PI,PI) without any discontinuity
-			var diff := atan2(sin(_smooth_wall_angle - rotation.y), cos(_smooth_wall_angle - rotation.y))
-			target_yaw = clampf(diff, -HIP_YAW_LIMIT, HIP_YAW_LIMIT)
-		_spine_yaw = lerpf(_spine_yaw, target_yaw, delta * 6.0)
-		skeleton.set_bone_pose_rotation(_spine_bone, Quaternion(Vector3.UP, _spine_yaw))
 
 func _update_animation(on_floor: bool) -> void:
 	if _pending_locomotion:
-		anim_tree.set("parameters/Locomotion/blend_position", Vector2(velocity.x, velocity.z).length())
-		anim_tree["parameters/conditions/do_locomotion"] = true
+		var _in_jump := anim_playback.get_current_node() == "Jump"
+		if not _in_jump or jump_playback.get_current_node() == "Jump_Land":
+			anim_tree.set("parameters/Locomotion/blend_position", Vector2(velocity.x, velocity.z).length())
+			anim_tree["parameters/conditions/do_locomotion"] = true
 		_pending_locomotion = false
+
+	if _pending_crouch:
+		anim_tree["parameters/conditions/do_crouch"] = true
+		_pending_crouch = false
+		return
 
 	var root_node := anim_playback.get_current_node()
 	var horizontal_speed := Vector2(velocity.x, velocity.z).length()
@@ -453,23 +506,28 @@ func _update_animation(on_floor: bool) -> void:
 		_attack_lunge_vel = Vector3.ZERO
 		_pending_lunge_vel = Vector3.ZERO
 
-	# Begin locomotion blend-in as Roll exits (crossfade handles the visual)
+	# Begin blend-in as Roll exits — go to Crouch if ctrl is still held
 	if _pending_return and root_node == "Roll":
-		anim_tree["parameters/conditions/do_locomotion"] = true
+		if _is_crouching:
+			anim_tree["parameters/conditions/do_crouch"] = true
+		else:
+			anim_tree["parameters/conditions/do_locomotion"] = true
 		_pending_return = false
 		return
 
 	if root_node == "Jump":
 		var sub_node := jump_playback.get_current_node()
+		# Player jumped again before Jump_Land finished — skip the rest of the landing anim.
+		if sub_node == "Jump_Land" and velocity.y > 0.1:
+			jump_playback.start("Jump_Start")
+			_pending_land = false
+			_pending_return = false
+			return
 		# Landing must be detected inside the Jump block — we return early here
 		if not _was_on_floor and on_floor:
-			if horizontal_speed > 1.0:
+			if horizontal_speed > 0.1:
 				_pending_return = true
-				anim_tree["parameters/conditions/do_roll"] = true
-			else:
-				if horizontal_speed > 0.1:
-					_pending_return = true
-				_pending_land = true
+			_pending_land = true
 			return
 		if _pending_land:
 			if sub_node == "Jump":
@@ -491,14 +549,10 @@ func _update_animation(on_floor: bool) -> void:
 		return
 
 	if not _was_on_floor and on_floor:
-		if horizontal_speed > 1.0:
+		if horizontal_speed > 0.1:
 			_pending_return = true
-			anim_tree["parameters/conditions/do_roll"] = true
-		else:
-			if horizontal_speed > 0.1:
-				_pending_return = true
-			anim_tree["parameters/conditions/do_jump"] = true
-			_pending_land = true
+		anim_tree["parameters/conditions/do_jump"] = true
+		_pending_land = true
 		return
 
 	if not on_floor:
@@ -506,8 +560,16 @@ func _update_animation(on_floor: bool) -> void:
 			anim_tree["parameters/conditions/do_jump"] = true
 		return
 
+	if root_node == "Roll":
+		var pos := anim_playback.get_current_play_position()
+		if _is_crouching and pos >= ROLL_CROUCH_CUTOFF:
+			anim_tree["parameters/conditions/do_crouch"] = true
+		elif not _is_crouching and pos >= ROLL_SPRINT_CUTOFF:
+			anim_tree["parameters/conditions/do_locomotion"] = true
+		return
+
 	# Don't interrupt one-shot states
-	if root_node in ["Jump", "Roll"] or root_node in ATTACK_STATES:
+	if root_node == "Jump" or root_node in ATTACK_STATES:
 		return
 
 	if _is_crouching:
